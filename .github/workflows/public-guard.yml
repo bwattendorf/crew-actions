@@ -105,8 +105,10 @@ jobs:
             if [ -n "$hits" ]; then
               fail=1
               echo "Forbidden word #$n found at:"
-              echo "$hits" | sed 's/^/  /'
-              echo "$hits" | while IFS=: read -r f l; do echo "::error file=$f,line=$l::forbidden word #$n (see public-guard input list)"; done
+              while IFS=: read -r f l; do
+                echo "  $f:$l"
+                echo "::error file=$f,line=$l::forbidden word #$n (see public-guard input list)"
+              done <<< "$hits"
             fi
           done <<< "$FORBIDDEN_WORDS"
           echo "Checked $n forbidden word(s)."
@@ -126,8 +128,10 @@ jobs:
             if [ -n "$hits" ]; then
               fail=1
               echo "Forbidden path pattern '$p' matches:"
-              echo "$hits" | sed 's/^/  /'
-              echo "$hits" | while IFS= read -r f; do echo "::error file=$f::tracked file matches forbidden path pattern"; done
+              while IFS= read -r f; do
+                echo "  $f"
+                echo "::error file=$f::tracked file matches forbidden path pattern"
+              done <<< "$hits"
             fi
           done <<< "$FORBIDDEN_PATHS"
           exit "$fail"
