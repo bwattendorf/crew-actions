@@ -1,0 +1,100 @@
+# node-gate: run a Node repo's ONE gate command on Linux.
+#
+# - Checks out the caller's repo.
+# - Node from the `node-version` input, or from .nvmrc in `working-directory`
+#   when the input is empty.
+# - npm download cache (~/.npm): restored on every run, saved only on the
+#   default branch, keyed by package-lock.json.
+# - `npm ci`, then `gate-command` (default `npm run ci`). Linux only.
+# Needs no secrets. The caller should set `concurrency` to cancel stale PR runs.
+name: node-gate
+
+on:
+  workflow_call:
+    inputs:
+      gate-command:
+        description: Command that decides green or red.
+        type: string
+        default: npm run ci
+      working-directory:
+        description: Folder (relative to the repo root) holding package.json.
+        type: string
+        default: "."
+      node-version:
+        description: Node version (e.g. "22"). Empty = read .nvmrc in working-directory.
+        type: string
+        default: ""
+      install-command:
+        description: Dependency install command.
+        type: string
+        default: npm ci
+      timeout-minutes:
+        description: Job timeout. Keep private-repo PR gates under ~8.
+        type: number
+        default: 15
+      fetch-depth:
+        description: Git history depth for checkout (0 = full history).
+        type: number
+        default: 1
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate (node)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          node-version-file: ${{ inputs.node-version == '' && format('{0}/.nvmrc', inputs.working-directory) || '' }}
+          package-manager-cache: false
+
+      - name: Cache key
+        id: key
+        run: |
+          echo "dir=$(npm config get cache)" >> "$GITHUB_OUTPUT"
+          echo "node=$(node --version)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore npm cache
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.key.outputs.dir }}
+          key: npm-${{ runner.os }}-${{ steps.key.outputs.node }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ steps.key.outputs.node }}-
+
+      - name: Install
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+        run: bash -euo pipefail -c "$INSTALL_COMMAND"
+
+      - name: Gate
+        env:
+          GATE_COMMAND: ${{ inputs.gate-command }}
+        run: |
+          echo "Gate: $GATE_COMMAND"
+          bash -euo pipefail -c "$GATE_COMMAND"
+
+      - name: Save npm cache (default branch only)
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.key.outputs.dir }}
+          key: npm-${{ runner.os }}-${{ steps.key.outputs.node }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}

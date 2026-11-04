@@ -1,0 +1,133 @@
+# public-guard: stop secrets and off-limits content from landing in a PUBLIC repo.
+#
+# 1. Secret scan with gitleaks (a pinned release, verified by SHA-256 before
+#    it runs). Scans git history by default, or just the checked-out files.
+#    Findings are redacted in the log. A `.gitleaks.toml` in the caller's repo
+#    root is used automatically (allowlists, extra rules).
+# 2. Forbidden words: fails if any tracked file contains one of the words in
+#    `forbidden-words` (one per line, case-insensitive, fixed strings).
+#    The log names file:line only, never the matching text.
+# 3. Forbidden paths: fails if any tracked file matches one of the globs in
+#    `forbidden-paths` (one per line, e.g. `**/*.pem`, `customer-data/**`).
+# Files matching `exclude-paths` are skipped for 2 (by default the workflow
+# folder, where the word list itself lives). Needs no secrets.
+name: public-guard
+
+on:
+  workflow_call:
+    inputs:
+      forbidden-words:
+        description: Newline-separated words/phrases that must never appear in tracked files.
+        type: string
+        default: ""
+      forbidden-paths:
+        description: Newline-separated git pathspec globs that must never be tracked.
+        type: string
+        default: ""
+      exclude-paths:
+        description: Newline-separated globs skipped by the forbidden-words check.
+        type: string
+        default: |
+          .github/workflows/**
+      scan-history:
+        description: true = gitleaks scans all commits; false = only the current files.
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: public guard
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ inputs.scan-history && 0 || 1 }}
+          persist-credentials: false
+
+      - name: Install gitleaks (pinned + checksum)
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "$tmp/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $tmp/$tarball" | sha256sum --check --strict
+          tar -xzf "$tmp/$tarball" -C "$tmp" gitleaks
+          install -m 0755 "$tmp/gitleaks" "$RUNNER_TEMP/gitleaks"
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Secret scan
+        env:
+          SCAN_HISTORY: ${{ inputs.scan-history }}
+        run: |
+          set -euo pipefail
+          if [ "$SCAN_HISTORY" = "true" ]; then
+            "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --exit-code 1 --verbose
+          else
+            "$RUNNER_TEMP/gitleaks" dir . --redact --no-banner --exit-code 1 --verbose
+          fi
+
+      - name: Forbidden words
+        if: inputs.forbidden-words != ''
+        env:
+          FORBIDDEN_WORDS: ${{ inputs.forbidden-words }}
+          EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
+        run: |
+          set -uo pipefail
+          excludes=()
+          while IFS= read -r p; do
+            p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+            [ -n "$p" ] && excludes+=(":(exclude,glob)$p")
+          done <<< "$EXCLUDE_PATHS"
+          fail=0; n=0
+          while IFS= read -r w; do
+            w="${w#"${w%%[![:space:]]*}"}"; w="${w%"${w##*[![:space:]]}"}"
+            [ -z "$w" ] && continue
+            n=$((n+1))
+            hits="$(git grep -n -I -i -F -e "$w" -- . "${excludes[@]}" | cut -d: -f1,2 || true)"
+            if [ -n "$hits" ]; then
+              fail=1
+              echo "Forbidden word #$n found at:"
+              echo "$hits" | sed 's/^/  /'
+              echo "$hits" | while IFS=: read -r f l; do echo "::error file=$f,line=$l::forbidden word #$n (see public-guard input list)"; done
+            fi
+          done <<< "$FORBIDDEN_WORDS"
+          echo "Checked $n forbidden word(s)."
+          exit "$fail"
+
+      - name: Forbidden paths
+        if: inputs.forbidden-paths != ''
+        env:
+          FORBIDDEN_PATHS: ${{ inputs.forbidden-paths }}
+        run: |
+          set -uo pipefail
+          fail=0
+          while IFS= read -r p; do
+            p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+            [ -z "$p" ] && continue
+            hits="$(git ls-files -- ":(glob)$p")"
+            if [ -n "$hits" ]; then
+              fail=1
+              echo "Forbidden path pattern '$p' matches:"
+              echo "$hits" | sed 's/^/  /'
+              echo "$hits" | while IFS= read -r f; do echo "::error file=$f::tracked file matches forbidden path pattern"; done
+            fi
+          done <<< "$FORBIDDEN_PATHS"
+          exit "$fail"

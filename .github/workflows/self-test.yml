@@ -1,0 +1,87 @@
+# self-test: this repo's own CI.
+# - actionlint (pinned release, SHA-256 checked) over every workflow here.
+# - Calls each reusable workflow from THIS commit (`./.github/workflows/...`)
+#   against the sample projects in examples/, so a broken change shows up
+#   here before any caller tracking @main picks it up.
+name: self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: self-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint (pinned + checksum)
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "$tmp/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  $tmp/$tarball" | sha256sum --check --strict
+          tar -xzf "$tmp/$tarball" -C "$tmp" actionlint
+          install -m 0755 "$tmp/actionlint" "$RUNNER_TEMP/actionlint"
+
+      - name: Lint workflows
+        run: |
+          "$RUNNER_TEMP/actionlint" -version
+          "$RUNNER_TEMP/actionlint" -color
+
+      - name: Third-party actions pinned to full SHAs
+        run: |
+          set -euo pipefail
+          bad="$(grep -rnE '^\s*-?\s*uses:\s*[^./][^@]*@' .github/workflows | grep -vE '@[0-9a-f]{40}( |$)' | grep -v 'bwattendorf/crew-actions/' || true)"
+          if [ -n "$bad" ]; then
+            echo "Unpinned action references:"; echo "$bad"; exit 1
+          fi
+          echo "All third-party actions are pinned to commit SHAs."
+
+  rust-example:
+    name: rust-gate example
+    needs: actionlint
+    uses: ./.github/workflows/rust-gate.yml
+    with:
+      working-directory: examples/rust-sample
+      timeout-minutes: 10
+
+  node-example:
+    name: node-gate example
+    needs: actionlint
+    uses: ./.github/workflows/node-gate.yml
+    with:
+      working-directory: examples/node-sample
+      timeout-minutes: 5
+
+  guard-example:
+    name: public-guard example
+    needs: actionlint
+    uses: ./.github/workflows/public-guard.yml
+    with:
+      forbidden-words: |
+        crew-actions-selftest-forbidden-marker
+      forbidden-paths: |
+        **/*.pem
+        **/id_rsa
