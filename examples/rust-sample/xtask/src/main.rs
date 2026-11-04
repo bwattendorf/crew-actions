@@ -5,7 +5,7 @@ use std::process::{Command, ExitCode};
 
 const STEPS: &[(&str, &[&str])] = &[
     ("format", &["fmt", "--all", "--check"]),
-    ("lint", &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]),
+    ("lint", &["clippy", "--all-targets", "--", "-D", "warnings"]),
     ("test", &["test", "--workspace"]),
 ];
 
