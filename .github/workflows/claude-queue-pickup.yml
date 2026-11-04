@@ -1,0 +1,70 @@
+# claude-queue-pickup (optional): when an issue gets the `claude-queue` label,
+# post a wake comment (and the `claude-wake` label) so the repo's OWN
+# claude-fix workflow picks the task up.
+#
+# This workflow never runs an agent and holds no API keys. It only comments.
+#
+# Important: GitHub does not start other workflows from events made with the
+# default GITHUB_TOKEN. If your claude-fix workflow listens for the comment or
+# the label, pass a `wake-token` secret (a fine-grained PAT or GitHub App token
+# with Issues: write on that repo only). Without it the comment is still posted
+# (useful as a visible marker) but will not trigger anything; the simplest
+# alternative is to have claude-fix listen to `issues: labeled` directly.
+#
+# Caller must trigger on `issues: types: [labeled]`.
+name: claude-queue-pickup
+
+on:
+  workflow_call:
+    inputs:
+      comment:
+        description: Comment text posted on the issue.
+        type: string
+        default: "@claude continue: pick up this claude-queue task and run the full loop"
+      trigger-label:
+        description: Label that means "queued for the agent".
+        type: string
+        default: claude-queue
+      wake-label:
+        description: Label added with the comment. Empty = add no label.
+        type: string
+        default: claude-wake
+    secrets:
+      wake-token:
+        description: Optional token so the comment/label can trigger the repo's claude-fix workflow.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  wake:
+    name: wake claude-fix
+    if: github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == inputs.trigger-label && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Comment and label
+        env:
+          GH_TOKEN: ${{ secrets.wake-token || github.token }}
+          USING_WAKE_TOKEN: ${{ secrets.wake-token != '' }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          COMMENT: ${{ inputs.comment }}
+          WAKE_LABEL: ${{ inputs.wake-label }}
+        run: |
+          set -euo pipefail
+          if [ -n "$WAKE_LABEL" ] && gh issue view "$ISSUE" -R "$REPO" --json labels --jq '.labels[].name' | grep -qxF "$WAKE_LABEL"; then
+            echo "Issue #$ISSUE already has '$WAKE_LABEL'; not waking twice."
+            exit 0
+          fi
+          gh issue comment "$ISSUE" -R "$REPO" --body "$COMMENT"
+          if [ -n "$WAKE_LABEL" ]; then
+            gh label create "$WAKE_LABEL" -R "$REPO" --color FBCA04 --description "Wake the agent" 2>/dev/null || true
+            gh issue edit "$ISSUE" -R "$REPO" --add-label "$WAKE_LABEL"
+          fi
+          if [ "$USING_WAKE_TOKEN" != "true" ]; then
+            echo "::warning::No wake-token given: the comment was posted with GITHUB_TOKEN, which does not trigger other workflows."
+          fi

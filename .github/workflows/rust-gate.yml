@@ -1,0 +1,94 @@
+# rust-gate: run a Rust repo's ONE gate command on Linux.
+#
+# - Checks out the caller's repo.
+# - Installs the toolchain named in the caller's rust-toolchain(.toml) file
+#   (falls back to `fallback-toolchain` when there is no file).
+# - Cargo cache: restored on every run, saved only on the default branch,
+#   so PR runs never fill the 10 GB cache quota.
+# - Runs `gate-command` (default `cargo xtask ci`). Linux only, on purpose:
+#   it is the cheapest runner on GitHub Free.
+# Needs no secrets. The caller should set `concurrency` to cancel stale PR runs.
+name: rust-gate
+
+on:
+  workflow_call:
+    inputs:
+      gate-command:
+        description: Command that decides green or red.
+        type: string
+        default: cargo xtask ci
+      working-directory:
+        description: Folder (relative to the repo root) to run the gate in.
+        type: string
+        default: "."
+      timeout-minutes:
+        description: Job timeout. Keep private-repo PR gates under ~8.
+        type: number
+        default: 15
+      fallback-toolchain:
+        description: Toolchain to use when the repo has no rust-toolchain file.
+        type: string
+        default: stable
+      fetch-depth:
+        description: Git history depth for checkout (0 = full history).
+        type: number
+        default: 1
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate (rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+          persist-credentials: false
+
+      - name: Install toolchain
+        env:
+          FALLBACK_TOOLCHAIN: ${{ inputs.fallback-toolchain }}
+        run: |
+          set -euo pipefail
+          dir="$PWD"; found=""
+          while :; do
+            if [ -f "$dir/rust-toolchain.toml" ] || [ -f "$dir/rust-toolchain" ]; then found="$dir"; break; fi
+            [ "$dir" = "$GITHUB_WORKSPACE" ] || [ "$dir" = "/" ] && break
+            dir="$(dirname "$dir")"
+          done
+          if [ -n "$found" ]; then
+            echo "Using toolchain file in ${found#"$GITHUB_WORKSPACE"}/"
+            rustup toolchain install
+          else
+            echo "No rust-toolchain file; using $FALLBACK_TOOLCHAIN"
+            rustup toolchain install "$FALLBACK_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+            rustup default "$FALLBACK_TOOLCHAIN"
+          fi
+          rustc --version
+          cargo --version
+
+      - name: Cargo cache (save on default branch only)
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ${{ inputs.working-directory }} -> target
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Gate
+        env:
+          GATE_COMMAND: ${{ inputs.gate-command }}
+        run: |
+          echo "Gate: $GATE_COMMAND"
+          bash -euo pipefail -c "$GATE_COMMAND"

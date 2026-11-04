@@ -1,0 +1,11 @@
+{
+  "name": "node-sample",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tiny project used only to exercise the node-gate workflow.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "ci": "node --test"
+  }
+}
